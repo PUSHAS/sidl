@@ -1,6 +1,7 @@
 use crate::types::product::{ShopifyProduct, ShopifyProductsResponse};
 use crate::SHOPIFY_ACCESS_TOKEN;
 use anyhow::Result;
+use async_trait::async_trait;
 
 pub struct ShopifyProducts {
 	client: reqwest::Client,

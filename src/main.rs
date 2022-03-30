@@ -2,23 +2,20 @@
 extern crate serde_derive;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate async_trait;
 extern crate serde;
-extern crate serde_json;
 
 pub mod iter;
 pub mod types;
 pub mod util;
 
+use crate::iter::{AsyncIterator, ShopifyProducts};
+use crate::util::link_ext;
 use anyhow::Result;
 use aws_sdk_s3::output::PutObjectOutput;
 use env_logger::Env;
-use iter::{AsyncIterator, ShopifyProducts};
 use lazy_static::lazy_static;
 use std::env::var;
 use tokio::task::JoinHandle;
-use util::link_ext;
 
 lazy_static! {
 	pub static ref SHOPIFY_ACCESS_TOKEN: String = var("SHOPIFY_ACCESS_TOKEN").unwrap();
