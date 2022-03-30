@@ -41,7 +41,7 @@ async fn handle_product(
 	};
 	let toml = toml::to_string(&data)?;
 
-	let _: Vec<JoinHandle<Result<Option<PutObjectOutput>, anyhow::Error>>> = product
+	let handles: Vec<JoinHandle<Result<Option<PutObjectOutput>, anyhow::Error>>> = product
 		.images
 		.into_iter()
 		.map(|image| -> JoinHandle<Result<Option<PutObjectOutput>, _>> {
@@ -80,6 +80,10 @@ async fn handle_product(
 			})
 		})
 		.collect();
+
+	for handle in handles {
+		let _ = handle.await?;
+	}
 
 	let request = s3_client
 		.put_object()
