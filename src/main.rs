@@ -12,10 +12,12 @@ pub mod types;
 pub mod util;
 
 use anyhow::Result;
+use aws_sdk_s3::output::PutObjectOutput;
 use env_logger::Env;
 use iter::{AsyncIterator, ShopifyProducts};
 use lazy_static::lazy_static;
 use std::env::var;
+use tokio::task::JoinHandle;
 use util::link_ext;
 
 lazy_static! {
@@ -24,10 +26,74 @@ lazy_static! {
 	static ref SHOPIFY_STORE: String = var("SHOPIFY_STORE").unwrap();
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct TOMLData {
 	shopify_id: i64,
 	title: String,
+}
+
+async fn handle_product(
+	s3_client: &aws_sdk_s3::Client,
+	product: types::product::ShopifyProduct,
+) -> Result<(), anyhow::Error> {
+	info!("Working on product: {}", product.title);
+
+	let data = TOMLData {
+		title: product.title,
+		shopify_id: product.id,
+	};
+	let toml = toml::to_string(&data)?;
+
+	let _: Vec<JoinHandle<Result<Option<PutObjectOutput>, anyhow::Error>>> = product
+		.images
+		.into_iter()
+		.map(|image| -> JoinHandle<Result<Option<PutObjectOutput>, _>> {
+			let s3_client = s3_client.clone();
+			let data = data.clone();
+			tokio::spawn(async move {
+				let ext =
+					link_ext(image.src.split('?').next().unwrap_or("foo.jpg")).unwrap_or("jpg");
+				let path = format!("{}/{}.{}", product.id, image.position, ext);
+
+				// check if the file already exists
+				let exists = s3_client
+					.head_object()
+					.bucket(AWS_BUCKET.as_str())
+					.key(&path)
+					.send()
+					.await;
+
+				if exists.is_ok() {
+					info!("File already exists: {}", path);
+					return Ok(None);
+				};
+
+				let response = reqwest::get(&image.src).await?;
+
+				let request = s3_client
+					.put_object()
+					.bucket(AWS_BUCKET.as_str())
+					.key(&path)
+					.body(response.bytes().await?.into());
+
+				let res = request.send().await?;
+				info!("Uploaded Image #{} for {}", image.position, &data.title);
+
+				Ok(Some(res))
+			})
+		})
+		.collect();
+
+	let request = s3_client
+		.put_object()
+		.bucket(AWS_BUCKET.as_str())
+		.key(format!("{}/data.toml", product.id))
+		.body(toml.into_bytes().into());
+
+	let _ = request.send().await?;
+	info!("Uploaded toml for {}\n", &data.title);
+
+	Ok(())
 }
 
 #[tokio::main]
@@ -41,56 +107,10 @@ async fn main() -> Result<()> {
 		"https://{}/admin/api/2021-07/products.json?limit=100",
 		SHOPIFY_STORE.as_str()
 	);
-	let mut iter = ShopifyProducts::new(start.to_string())?;
+	let mut products = ShopifyProducts::new(start.to_string())?;
 
-	while let Some(product) = iter.next().await {
-		let product = product?;
-		info!("Working on product: {}", product.title);
-
-		let data = TOMLData {
-			title: product.title,
-			shopify_id: product.id,
-		};
-		let toml = toml::to_string(&data)?;
-
-		// for each product.image, download the image and upload to s3 with the folder name as the product id
-		for image in &product.images {
-			let ext = link_ext(image.src.split('?').next().unwrap_or("foo.jpg")).unwrap_or("jpg");
-			let path = format!("{}/{}.{}", product.id, image.position, ext);
-
-			// check if the file already exists
-			let exists = s3_client
-				.head_object()
-				.bucket(AWS_BUCKET.as_str())
-				.key(&path)
-				.send()
-				.await;
-
-			if exists.is_ok() {
-				info!("File already exists: {}", path);
-				continue;
-			};
-
-			let response = reqwest::get(&image.src).await?;
-
-			let request = s3_client
-				.put_object()
-				.bucket(AWS_BUCKET.as_str())
-				.key(&path)
-				.body(response.bytes().await?.into());
-
-			request.send().await?;
-			info!("Uploaded Image #{} for {}", image.position, &data.title);
-		}
-
-		// upload the toml file
-		let request = s3_client
-			.put_object()
-			.bucket(AWS_BUCKET.as_str())
-			.key(format!("{}/data.toml", product.id))
-			.body(toml.into_bytes().into());
-		let _ = request.send().await?;
-		info!("Uploaded toml for {}\n", &data.title);
+	while let Some(product) = products.next().await {
+		handle_product(&s3_client, product?).await?;
 	}
 
 	Ok(())
